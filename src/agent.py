@@ -23,7 +23,13 @@ NEO4J_USER = "73946c42"
 if NEO4J_URI and NEO4J_URI.startswith("neo4j+s://"):
     NEO4J_URI = NEO4J_URI.replace("neo4j+s://", "neo4j+ssc://")
 
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0, groq_api_key=GROQ_API_KEY)
+# Use standard Groq production model ID
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    temperature=0,
+    groq_api_key=GROQ_API_KEY
+)
+
 router = QueryRouter(llm=llm)
 sql_agent = SQLAgent(db_url=POSTGRES_URL, llm=llm)
 graph_agent = GraphAgent(uri=NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), llm=llm)
@@ -47,28 +53,8 @@ def router_node(state: AgentState) -> AgentState:
 def sql_node(state: AgentState) -> AgentState:
     print("--- [Node: SQL Agent] Processing Relational Path ---")
     
-    # Exact table context provided to avoid bad SQL generation
-    schema_info = """
-    Table: dvf_transactions
-    Columns:
-    - mutation_id (VARCHAR)
-    - mutation_date (DATE)
-    - property_type (VARCHAR) -- e.g. 'Appartement', 'Maison'
-    - valeur_fonciere (NUMERIC)
-    - surface_reelle_bati (NUMERIC)
-    - price_per_sqm (NUMERIC)
-    - code_departement (VARCHAR) -- e.g. '75'
-    - nom_commune (VARCHAR) -- e.g. 'Paris 11e', 'Paris 18e', 'Boulogne-Billancourt'
-    - nombre_pieces_principales (INT)
-    """
-    
-    prompt = f"""
-    Write ONLY a valid PostgreSQL SQL query (no markdown, no ```sql formatting) to answer the user request.
-    {schema_info}
-    
-    User Question: {state['question']}
-    """
-    generated_sql = llm.invoke(prompt).content.strip().replace("```sql", "").replace("```", "").strip()
+    sql_out = sql_agent.generate_query(state["question"])
+    generated_sql = sql_out.query
     
     try:
         results = sql_agent.execute_query(generated_sql)
@@ -81,25 +67,8 @@ def sql_node(state: AgentState) -> AgentState:
 def graph_node(state: AgentState) -> AgentState:
     print("--- [Node: Graph Agent] Processing Network Path ---")
     
-    graph_info = """
-    Neo4j Graph Schema:
-    - Nodes:
-      (:Property {id, type, surface, rooms})
-      (:Municipality {name, department})
-      (:Entity {name, role})
-    - Relationships:
-      (:Property)-[:LOCATED_IN]->(:Municipality)
-      (seller:Entity)-[:TRANSFERRED {date, price}]->(p:Property)
-      (buyer:Entity)-[:ACQUIRED {date, price}]->(p:Property)
-    """
-    
-    prompt = f"""
-    Write ONLY a valid Cypher query (no markdown, no ```cypher formatting) to answer the user request.
-    {graph_info}
-    
-    User Question: {state['question']}
-    """
-    generated_cypher = llm.invoke(prompt).content.strip().replace("```cypher", "").replace("```", "").strip()
+    graph_out = graph_agent.generate_query(state["question"])
+    generated_cypher = graph_out.query
     
     try:
         results = graph_agent.execute_cypher(generated_cypher)
@@ -111,15 +80,22 @@ def graph_node(state: AgentState) -> AgentState:
 
 def synthesizer_node(state: AgentState) -> AgentState:
     print("--- [Node: Synthesizer] Drafting Final Answer ---")
+    
+    # Cap string representation to stay under token limits
+    raw_results = str(state['query_results'])
+    truncated_results = raw_results[:2500] if len(raw_results) > 2500 else raw_results
+    
     prompt = f"""
-    You are an expert Real Estate BI Assistant. Answer the user's question clearly using ONLY the provided database results.
+    You are an expert Real Estate BI Assistant specializing in the Lyon / Rhône (DVF 69) market. 
+    Answer the user's question clearly using ONLY the provided database results.
     
     User Question: {state['question']}
     Execution Engine: {state['route']}
     Executed Query: {state['generated_query']}
-    Retrieved Data: {state['query_results']}
+    Retrieved Data: {truncated_results}
     
-    Respond in the language of the question.
+    Respond in the language of the prompt (French or English).
+    If database results are empty (`[]`), explain politely that no matching records were found.
     """
     response = llm.invoke(prompt)
     return {**state, "final_answer": response.content}
@@ -147,11 +123,5 @@ app = workflow.compile()
 
 
 if __name__ == "__main__":
-    # Test 1: Relational SQL Query
-    res_sql = app.invoke({"question": "Quel est le prix moyen au mètre carré des appartements à Paris 11e?"})
-    print(f"\n[FINAL RESPONSE - SQL PATH]:\n{res_sql['final_answer']}\n")
-    print("=" * 70)
-
-    # Test 2: Graph Network Query
-    res_graph = app.invoke({"question": "Quelles transactions ont été effectuées par Jean Dupont?"})
-    print(f"\n[FINAL RESPONSE - GRAPH PATH]:\n{res_graph['final_answer']}\n")
+    res_graph = app.invoke({"question": "Quelles sont les propriétés situées à Villeurbanne?"})
+    print(f"\n[FINAL RESPONSE]:\n{res_graph['final_answer']}\n")
