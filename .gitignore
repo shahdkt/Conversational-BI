@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+# Ignore raw data files
+data/*.csv
+data/
